@@ -1,0 +1,91 @@
+// Prisma schema for CampusGuard
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum IncidentCategory {
+  RAGGING
+  HARASSMENT
+  STALKING
+  THREATS
+  CYBERBULLYING
+  OTHER
+}
+
+enum ReportStatus {
+  SUBMITTED
+  UNDER_REVIEW
+  ACTION_TAKEN
+  RESOLVED
+  DISMISSED
+}
+
+enum MessageSender {
+  REPORTER
+  AUTHORITY
+}
+
+enum AuthorityRole {
+  AUTHORITY
+  ADMIN
+}
+
+model reports {
+  id               String           @id @default(uuid())
+  passcodeLookup   String           @unique
+  category         IncidentCategory
+  description      String           @db.Text
+  incidentLocation String?
+  occurredAt       DateTime?
+  status           ReportStatus     @default(SUBMITTED)
+  authorityNote    String?          @db.Text
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  media            report_media[]
+  messages         messages[]
+
+  @@index([createdAt])
+}
+
+model report_media {
+  id         String   @id @default(uuid())
+  reportId   String
+  storageKey String
+  fileType   String?
+  fileSize   Int?
+  createdAt  DateTime @default(now())
+
+  report     reports  @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  @@index([reportId])
+}
+
+model messages {
+  id        String        @id @default(uuid())
+  reportId  String
+  sender    MessageSender
+  body      String        @db.Text
+  createdAt DateTime      @default(now())
+
+  report    reports       @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  @@index([reportId, createdAt])
+}
+
+model authorities {
+  id        String        @id @default(uuid())
+  email     String        @unique
+  password  String
+  name      String
+  role      AuthorityRole @default(AUTHORITY)
+  isActive  Boolean       @default(true)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+}
