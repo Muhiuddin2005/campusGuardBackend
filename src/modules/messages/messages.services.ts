@@ -3,6 +3,12 @@ import AppError from '../../errors/AppError';
 import prisma from '../../libs/prisma';
 import { hashPasscode, isValidPasscodeFormat } from '../reports/reports.helpers';
 import {
+  addLocalMessage,
+  findLocalReportById,
+  findLocalReportByPasscode,
+  getLocalMessages,
+} from '../reports/reports.localStore';
+import {
   TGetReporterThreadPayload,
   TMessageResponse,
   TSendAuthorityMessagePayload,
@@ -15,16 +21,25 @@ const resolveReportByPasscode = async (passcode: string) => {
   }
 
   const passcodeLookup = hashPasscode(passcode);
-  const report = await prisma.reports.findUnique({
-    where: { passcodeLookup },
-    select: { id: true, status: true },
-  });
 
-  if (!report) {
-    throw new AppError(httpStatus.NOT_FOUND, 'No report found for this passcode');
+  try {
+    const report = await prisma.reports.findUnique({
+      where: { passcodeLookup },
+      select: { id: true, status: true },
+    });
+    if (report) {
+      return report;
+    }
+  } catch (err: any) {
+    console.warn('⚠️ [Messages] Prisma query failed, checking local store:', err?.message);
   }
 
-  return report;
+  const localReport = findLocalReportByPasscode(passcodeLookup);
+  if (localReport) {
+    return { id: localReport.id, status: localReport.status };
+  }
+
+  throw new AppError(httpStatus.NOT_FOUND, 'No report found for this passcode');
 };
 
 const getReporterThread = async (
@@ -33,20 +48,31 @@ const getReporterThread = async (
   const { passcode } = payload;
   const report = await resolveReportByPasscode(passcode);
 
-  const messages = await prisma.messages.findMany({
-    where: { reportId: report.id },
-    select: {
-      id: true,
-      sender: true,
-      body: true,
-      createdAt: true,
-    },
-    orderBy: {
-      createdAt: 'asc',
-    },
-  });
+  try {
+    const messages = await prisma.messages.findMany({
+      where: { reportId: report.id },
+      select: {
+        id: true,
+        sender: true,
+        body: true,
+        createdAt: true,
+      },
+      orderBy: {
+        createdAt: 'asc',
+      },
+    });
+    return messages;
+  } catch (err: any) {
+    console.warn('⚠️ [Messages] Prisma query failed, fetching local thread:', err?.message);
+  }
 
-  return messages;
+  const localMsgs = getLocalMessages(report.id);
+  return localMsgs.map((m) => ({
+    id: m.id,
+    sender: m.sender,
+    body: m.body,
+    createdAt: m.createdAt,
+  }));
 };
 
 const sendReporterMessage = async (
@@ -60,21 +86,36 @@ const sendReporterMessage = async (
 
   const report = await resolveReportByPasscode(passcode);
 
-  const message = await prisma.messages.create({
-    data: {
-      reportId: report.id,
-      sender: 'REPORTER',
-      body: body.trim(),
-    },
-    select: {
-      id: true,
-      sender: true,
-      body: true,
-      createdAt: true,
-    },
-  });
+  try {
+    const message = await prisma.messages.create({
+      data: {
+        reportId: report.id,
+        sender: 'REPORTER',
+        body: body.trim(),
+      },
+      select: {
+        id: true,
+        sender: true,
+        body: true,
+        createdAt: true,
+      },
+    });
+    return message;
+  } catch (err: any) {
+    console.warn('⚠️ [Messages] Prisma create failed, saving to local store:', err?.message);
+  }
 
-  return message;
+  const localMsg = addLocalMessage(report.id, 'REPORTER', body.trim());
+  if (!localMsg) {
+    throw new AppError(httpStatus.INTERNAL_SERVER_ERROR, 'Failed to save message');
+  }
+
+  return {
+    id: localMsg.id,
+    sender: localMsg.sender,
+    body: localMsg.body,
+    createdAt: localMsg.createdAt,
+  };
 };
 
 const getAuthorityThread = async (reportId: string): Promise<TMessageResponse[]> => {
@@ -82,29 +123,43 @@ const getAuthorityThread = async (reportId: string): Promise<TMessageResponse[]>
     throw new AppError(httpStatus.BAD_REQUEST, 'Report ID is required');
   }
 
-  const report = await prisma.reports.findUnique({
-    where: { id: reportId },
-    select: { id: true },
-  });
+  try {
+    const report = await prisma.reports.findUnique({
+      where: { id: reportId },
+      select: { id: true },
+    });
 
-  if (!report) {
+    if (report) {
+      const messages = await prisma.messages.findMany({
+        where: { reportId },
+        select: {
+          id: true,
+          sender: true,
+          body: true,
+          createdAt: true,
+        },
+        orderBy: {
+          createdAt: 'asc',
+        },
+      });
+      return messages;
+    }
+  } catch (err: any) {
+    console.warn('⚠️ [Messages] Prisma query failed, checking local store:', err?.message);
+  }
+
+  const localReport = findLocalReportById(reportId);
+  if (!localReport) {
     throw new AppError(httpStatus.NOT_FOUND, 'Report not found');
   }
 
-  const messages = await prisma.messages.findMany({
-    where: { reportId },
-    select: {
-      id: true,
-      sender: true,
-      body: true,
-      createdAt: true,
-    },
-    orderBy: {
-      createdAt: 'asc',
-    },
-  });
-
-  return messages;
+  const localMsgs = getLocalMessages(reportId);
+  return localMsgs.map((m) => ({
+    id: m.id,
+    sender: m.sender,
+    body: m.body,
+    createdAt: m.createdAt,
+  }));
 };
 
 const sendAuthorityMessage = async (
@@ -121,31 +176,48 @@ const sendAuthorityMessage = async (
     throw new AppError(httpStatus.BAD_REQUEST, 'Message text is required');
   }
 
-  const report = await prisma.reports.findUnique({
-    where: { id: reportId },
-    select: { id: true },
-  });
+  try {
+    const report = await prisma.reports.findUnique({
+      where: { id: reportId },
+      select: { id: true },
+    });
 
-  if (!report) {
+    if (report) {
+      const message = await prisma.messages.create({
+        data: {
+          reportId,
+          sender: 'AUTHORITY',
+          body: body.trim(),
+        },
+        select: {
+          id: true,
+          sender: true,
+          body: true,
+          createdAt: true,
+        },
+      });
+      return message;
+    }
+  } catch (err: any) {
+    console.warn('⚠️ [Messages] Prisma create failed, saving to local store:', err?.message);
+  }
+
+  const localReport = findLocalReportById(reportId);
+  if (!localReport) {
     throw new AppError(httpStatus.NOT_FOUND, 'Report not found');
   }
 
-  // Sender is recorded only as role 'AUTHORITY' — no individual user ID is logged
-  const message = await prisma.messages.create({
-    data: {
-      reportId,
-      sender: 'AUTHORITY',
-      body: body.trim(),
-    },
-    select: {
-      id: true,
-      sender: true,
-      body: true,
-      createdAt: true,
-    },
-  });
+  const localMsg = addLocalMessage(reportId, 'AUTHORITY', body.trim());
+  if (!localMsg) {
+    throw new AppError(httpStatus.INTERNAL_SERVER_ERROR, 'Failed to save message');
+  }
 
-  return message;
+  return {
+    id: localMsg.id,
+    sender: localMsg.sender,
+    body: localMsg.body,
+    createdAt: localMsg.createdAt,
+  };
 };
 
 const MessagesServices = {

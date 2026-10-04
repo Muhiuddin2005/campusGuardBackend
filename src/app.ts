@@ -1,6 +1,7 @@
 import cors from 'cors';
 import express, { Application, Request, Response } from 'express';
 import helmet from 'helmet';
+import path from 'path';
 import configs from './configs/configs';
 import globalErrorHandler from './middlewares/globalErrorHandler';
 import notFound from './middlewares/notFound';
@@ -38,6 +39,9 @@ app.use(
 // Body parsers
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Static evidence files
+app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
 // Health check endpoint
 app.get('/', (req: Request, res: Response) => {
